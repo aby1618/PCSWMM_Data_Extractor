@@ -131,7 +131,12 @@ class SWMMApp:
             results = []
 
             for out_file in self.out_file_paths:
-                output = SwmmOutput(out_file)
+                output = self.parse_swmm_out_file(out_file)
+                if output is None:
+                    # Skip this .OUT file or record an error
+                    results.append({"Name": None, ".OUT file name": out_file, "Error": "Could not parse this file"})
+                    continue
+
                 out_file_name = out_file.split('/')[-1]
 
                 for node_name in node_names:
@@ -203,15 +208,31 @@ class SWMMApp:
         finally:
             self.progress_bar.stop()
 
+    def parse_swmm_out_file(self, file_path):
+        """
+        Centralized method to parse a SWMM .OUT file using SwmmOutput.
+        Returns the SwmmOutput object or None on error.
+        """
+        try:
+            out = SwmmOutput(file_path)
+            return out
+        except Exception as e:
+            logging.error(f"[ERROR] Could not parse {file_path}: {e}")
+            return None
+
     def open_visualization_popup(self):
-        if not self.out_file_paths:
-            messagebox.showerror("Error", "No .OUT files selected for visualization.")
+        if not self.out_file_paths or not self.excel_file_path:
+            messagebox.showerror("Error", "Please select both .OUT and Excel files for visualization.")
             return
 
         popup = tk.Toplevel(self.root)
         popup.title("Select Graphs to Visualize")
         popup.configure(bg=BG_COLOR)
 
+        tk.Label(popup, text="Select Nodes and Files to Visualize", bg=BG_COLOR, fg=FG_COLOR).pack(pady=10)
+
+        # change from here
+        # File checkboxes with select all
         file_frame = tk.Frame(popup, bg=BG_COLOR)
         file_frame.pack(pady=5)
 
@@ -221,7 +242,8 @@ class SWMMApp:
         for i, file_path in enumerate(self.out_file_paths):
             var = tk.BooleanVar(value=False)
             self.file_vars[file_path] = var
-            tk.Checkbutton(file_frame, text=file_path, variable=var, bg=BG_COLOR, fg=FG_COLOR, selectcolor=BUTTON_COLOR).grid(row=i + 1, column=0, sticky="w")
+            tk.Checkbutton(file_frame, text=file_path, variable=var, bg=BG_COLOR, fg=FG_COLOR,
+                           selectcolor=BUTTON_COLOR).grid(row=i + 1, column=0, sticky="w")
 
         select_all_files_var = tk.BooleanVar(value=False)
 
@@ -229,9 +251,11 @@ class SWMMApp:
             for var in self.file_vars.values():
                 var.set(select_all_files_var.get())
 
-        tk.Checkbutton(file_frame, text="Select All", variable=select_all_files_var, command=toggle_select_all_files, bg=BG_COLOR, fg=FG_COLOR, selectcolor=BUTTON_COLOR).grid(row=len(self.out_file_paths) + 1, column=0, sticky="w")
+        tk.Checkbutton(file_frame, text="Select All", variable=select_all_files_var, command=toggle_select_all_files,
+                       bg=BG_COLOR, fg=FG_COLOR, selectcolor=BUTTON_COLOR).grid(row=len(self.out_file_paths) + 1,
+                                                                                column=0, sticky="w")
 
-        # Select nodes with checkboxes
+        # Node checkboxes with select all
         node_frame = tk.Frame(popup, bg=BG_COLOR)
         node_frame.pack(pady=5)
 
@@ -240,21 +264,179 @@ class SWMMApp:
         self.node_vars = {}
         try:
             df = pd.read_excel(self.excel_file_path)
-            nodes = df["Name"].tolist()
+            nodes = df['Name'].tolist()
             for i, node in enumerate(nodes):
                 var = tk.BooleanVar(value=False)
                 self.node_vars[node] = var
-                tk.Checkbutton(node_frame, text=node, variable=var, bg=BG_COLOR, fg=FG_COLOR, selectcolor=BUTTON_COLOR).grid(row=i + 1, column=0, sticky="w")
+                tk.Checkbutton(node_frame, text=node, variable=var, bg=BG_COLOR, fg=FG_COLOR,
+                               selectcolor=BUTTON_COLOR).grid(row=i + 1, column=0, sticky="w")
+
+            select_all_nodes_var = tk.BooleanVar(value=False)
+
+            def toggle_select_all_nodes():
+                for var in self.node_vars.values():
+                    var.set(select_all_nodes_var.get())
+
+            tk.Checkbutton(node_frame, text="Select All", variable=select_all_nodes_var,
+                           command=toggle_select_all_nodes, bg=BG_COLOR, fg=FG_COLOR, selectcolor=BUTTON_COLOR).grid(
+                row=len(nodes) + 1, column=0, sticky="w")
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load nodes from Excel: {e}")
 
-        select_all_nodes_var = tk.BooleanVar(value=False)
+        # Buttons for aggregated and comparative visualization
 
-        def toggle_select_all_nodes():
-            for var in self.node_vars.values():
-                var.set(select_all_nodes_var.get())
+        # Tooltip Helper
+        def show_tooltip(message):
+            tooltip = tk.Toplevel(self.root)
+            tooltip.title("Information")
+            tk.Label(tooltip, text=message, bg=BG_COLOR, fg=FG_COLOR, padx=10, pady=10).pack()
+            tk.Button(tooltip, text="Close", command=tooltip.destroy, bg=BUTTON_COLOR, fg=FG_COLOR).pack(pady=5)
 
-        tk.Checkbutton(node_frame, text="Select All", variable=select_all_nodes_var, command=toggle_select_all_nodes, bg=BG_COLOR, fg=FG_COLOR, selectcolor=BUTTON_COLOR).grid(row=len(nodes) + 1, column=0, sticky="w")
+        action_frame = tk.Frame(popup, bg=BG_COLOR)
+        action_frame.pack(pady=10)
+
+        def aggregated_visualization():
+            selected_files = [file for file, var in self.file_vars.items() if var.get()]
+            selected_nodes = [node for node, var in self.node_vars.items() if var.get()]
+
+            if not selected_files or not selected_nodes:
+                messagebox.showerror("Error", "Please select at least one .OUT file and one node.")
+                return
+
+            try:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                for file_path in selected_files:
+                    output = self.parse_swmm_out_file(file_path)
+                    if output is None:
+                        # Could log or show a message, but let's skip
+                        continue
+
+                    for node in selected_nodes:
+                        inflow_data = output.get_part("node", node, "total_inflow")
+                        if inflow_data is not None and not inflow_data.empty:
+                            ax.plot(inflow_data, label=f"{node} ({file_path.split('/')[-1]})")
+
+                ax.set_title("Aggregated Inflow Data")
+                ax.set_xlabel("Time")
+                ax.set_ylabel("Flow")
+                ax.legend()
+
+                graph_window = tk.Toplevel(self.root)
+                graph_window.title("Aggregated Visualization")
+
+                canvas = FigureCanvasTkAgg(fig, master=graph_window)
+                canvas.draw()
+                canvas.get_tk_widget().pack()
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Visualization error: {e}")
+
+        def comparative_visualization():
+            selected_files = [file for file, var in self.file_vars.items() if var.get()]
+            selected_nodes = [node for node, var in self.node_vars.items() if var.get()]
+
+            if not selected_files or not selected_nodes:
+                messagebox.showerror("Error", "Please select at least one .OUT file and one node.")
+                return
+
+            try:
+                fig, axes = plt.subplots(len(selected_nodes), len(selected_files),
+                                         figsize=(10 * len(selected_files), 6 * len(selected_nodes)), squeeze=False)
+                for row, node in enumerate(selected_nodes):
+                    for col, file_path in enumerate(selected_files):
+                        output = self.parse_swmm_out_file(file_path)
+                        if output is None:
+                            ax = axes[row][col]
+                            ax.set_title(f"Error reading file: {file_path.split('/')[-1]}")
+                            ax.axis("off")
+                            continue
+
+                        inflow_data = output.get_part("node", node, "total_inflow")
+                        ax = axes[row][col]
+                        if inflow_data is not None and not inflow_data.empty:
+                            ax.plot(inflow_data, label=f"{node} ({file_path.split('/')[-1]})")
+                            ax.set_title(f"Node: {node}, File: {file_path.split('/')[-1]}")
+                            ax.set_xlabel("Time")
+                            ax.set_ylabel("Flow")
+                            ax.legend()
+                        else:
+                            ax.set_title(f"No data for Node: {node}, File: {file_path.split('/')[-1]}")
+                            ax.axis("off")
+
+                fig.tight_layout()
+
+                graph_window = tk.Toplevel(self.root)
+                graph_window.title("Comparative Visualization")
+
+                canvas = FigureCanvasTkAgg(fig, master=graph_window)
+                canvas.draw()
+                canvas.get_tk_widget().pack()
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Visualization error: {e}")
+
+        def aggregated_visualization():
+            selected_files = [file for file, var in self.file_vars.items() if var.get()]
+            selected_nodes = [node for node, var in self.node_vars.items() if var.get()]
+
+            if not selected_files or not selected_nodes:
+                messagebox.showerror("Error", "Please select at least one .OUT file and one node.")
+                return
+
+            try:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                for file_path in selected_files:
+                    output = SwmmOutput(file_path)
+                    for node in selected_nodes:
+                        inflow_data = output.get_part("node", node, "total_inflow")
+                        if inflow_data is not None and not inflow_data.empty:
+                            ax.plot(inflow_data, label=f"{node} ({file_path.split('/')[-1]})")
+
+                ax.set_title("Aggregated Inflow Data")
+                ax.set_xlabel("Time")
+                ax.set_ylabel("Flow")
+                ax.legend()
+
+                graph_window = tk.Toplevel(self.root)
+                graph_window.title("Aggregated Visualization")
+
+                toolbar_frame = tk.Frame(graph_window)
+                toolbar_frame.pack()
+
+                canvas = FigureCanvasTkAgg(fig, master=graph_window)
+                canvas.draw()
+                canvas.get_tk_widget().pack()
+
+                toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+                toolbar.update()
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Visualization error: {e}")
+
+
+
+        # Aggregated Visualization with Tooltip
+        agg_frame = tk.Frame(action_frame, bg=BG_COLOR)
+        agg_frame.pack(side=tk.LEFT, padx=10)
+
+        tk.Button(agg_frame, text="Aggregated Visualization", command=aggregated_visualization, bg=BUTTON_COLOR,
+                  fg=FG_COLOR).pack(side=tk.LEFT)
+        tk.Button(agg_frame, text="?", command=lambda: show_tooltip(
+            "Aggregated Visualization shows combined data trends for all selected files and nodes."), bg=BG_COLOR,
+                  fg=FG_COLOR).pack(side=tk.LEFT, padx=5)
+
+
+        # Comparative Visualization with Tooltip
+        comp_frame = tk.Frame(action_frame, bg=BG_COLOR)
+        comp_frame.pack(side=tk.RIGHT, padx=10)
+
+        tk.Button(comp_frame, text="Comparative Visualization", command=comparative_visualization, bg=BUTTON_COLOR,
+                  fg=FG_COLOR).pack(side=tk.LEFT)
+        tk.Button(comp_frame, text="?", command=lambda: show_tooltip(
+            "Comparative Visualization displays side-by-side graphs for selected files and nodes."), bg=BG_COLOR,
+                  fg=FG_COLOR).pack(side=tk.LEFT, padx=5)
+
 
         # Visualize Button
         def visualize():
@@ -269,7 +451,13 @@ class SWMMApp:
                 # Prepare graph data
                 graphs = []
                 for file_path in selected_files:
-                    output = SwmmOutput(file_path)
+                    output = self.parse_swmm_out_file(file_path)
+                    if output is None:
+                        # If parse failed, still append a placeholder for consistent indexing
+                        for node in selected_nodes:
+                            graphs.append((None, node, file_path))
+                        continue
+
                     for node in selected_nodes:
                         inflow_data = output.get_part("node", node, "total_inflow")
                         if inflow_data is not None and not inflow_data.empty:
@@ -353,6 +541,16 @@ class SWMMApp:
         canvas = FigureCanvasTkAgg(fig, master=graph_window)
         canvas.draw()
         canvas.get_tk_widget().pack()
+
+    # Matplotlib Toolbar Integration
+    def add_toolbar(fig, graph_window):
+        toolbar_frame = tk.Frame(graph_window)
+        toolbar_frame.pack()
+        canvas = FigureCanvasTkAgg(fig, master=graph_window)
+        canvas.draw()
+        canvas.get_tk_widget().pack()
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
 
 # Start application
 if __name__ == "__main__":
