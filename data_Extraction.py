@@ -567,50 +567,52 @@ class SWMMApp:
         # Pre-load data & create a DataFrame with DateTimeIndex for each file
         # Also handle downsampling if > 1 million points
         for out_file in selected_files:
-            # parse_swmm_out_file logic or direct SwmmOutput usage
-            node_dataframes = {}
+            output_obj = self.parse_swmm_out_file(out_file)
+            if output_obj is None:
+                tk.messagebox.showwarning("Warning", f"Could not parse {out_file}")
+                continue
 
+            node_dataframes = {}
             for node_name in selected_nodes:
                 df = self.load_swmm_timeseries(out_file, node_name)
                 if df is not None:
-                    # Downsample if needed
+                    # (A) Convert numeric index -> Datetime (if needed)
+                    if not pd.api.types.is_datetime64_any_dtype(df.index):
+                        # Example assumption: index in hours
+                        fallback_start = datetime(2020, 1, 1)
+                        numeric_hours = df.index.astype(float)
+                        df.index = [fallback_start + pd.Timedelta(hours=h) for h in numeric_hours]
+
+                    # (B) Downsample if large
                     if len(df) > 1_000_000:
                         tk.messagebox.showinfo(
                             "Performance Note",
-                            f"Data in {out_file} for node {node_name} is large. Downsampling ..."
+                            f"Data in {out_file} for node {node_name} is large. Downsampling..."
                         )
                         df = df.iloc[::10, :]
-
                     node_dataframes[node_name] = df
                 else:
-                    # If no data, store None
                     node_dataframes[node_name] = None
 
-            # The color for this file, using existing presets if available
+            # (C) Determine earliest start among loaded nodes
+            valid_dfs = [ndf for ndf in node_dataframes.values() if isinstance(ndf, pd.DataFrame)]
+            if valid_dfs:
+                # earliest among them
+                earliest_time = min(d.index[0] for d in valid_dfs)
+            else:
+                earliest_time = None
+
+            # (D) Store in overlay_data_storage
             default_color = self.color_presets.get(out_file, "#000000")
             self.overlay_data_storage[out_file] = {
                 "node_dfs": node_dataframes,
                 "color": default_color,
-                "start_datetime": None,
+                # The user might later choose to align to a brand-new date,
+                # but let's store the raw earliest as "original_start_datetime"
+                "original_start_datetime": earliest_time,
+                # "start_datetime" will be the current alignment base
+                "start_datetime": earliest_time,
                 "shift_offset": pd.Timedelta(0),
-            }
-
-            valid_dfs = [ndf for ndf in node_dataframes.values() if isinstance(ndf, pd.DataFrame)]
-            if valid_dfs:
-                earliest_time = min(d.index[0] for d in valid_dfs)
-                self.overlay_data_storage[out_file]["start_datetime"] = earliest_time
-            else:
-                self.overlay_data_storage[out_file]["start_datetime"] = None
-
-            # The color for this file, using existing presets if available
-            default_color = self.color_presets.get(out_file, "#000000")  # black if no preset
-            self.overlay_data_storage[out_file] = {
-                "node_dfs": node_dataframes,
-                "color": default_color,
-                # We'll store the original start time if known,
-                # or we guess from the earliest index among selected nodes
-                "start_datetime": None,
-                "shift_offset": pd.Timedelta(0)
             }
 
             # Attempt to find an earliest timestamp among loaded nodes
@@ -672,90 +674,93 @@ class SWMMApp:
         self.selected_nodes_list = selected_nodes
 
         def plot_current_node():
-            """Plot overlay for the currently selected node index using Bokeh."""
+            """
+            Plot overlay for the currently selected node index using Bokeh.
+            """
             if not self.selected_nodes_list:
                 tk.messagebox.showerror("Error", "No nodes selected.")
                 return
 
             node = self.selected_nodes_list[self.current_node_index]
-            # 1) Update shift offsets based on user-entered date/time
-            #    shift_offset = user_chosen_datetime - original_start_datetime
+
+            # For each file, read the user-chosen alignment date from dt_var
             for file, config in self.overlay_data_storage.items():
                 user_dt_str = self.file_config_entries[file]["dt_var"].get()
-                if config["start_datetime"] is not None and user_dt_str:
-                    try:
-                        user_dt = datetime.strptime(user_dt_str, "%Y-%m-%d %H:%M")
-                        shift_offset = user_dt - config["start_datetime"]
-                        config["shift_offset"] = pd.Timedelta(shift_offset)
-                    except:
-                        config["shift_offset"] = pd.Timedelta(0)
-                else:
-                    config["shift_offset"] = pd.Timedelta(0)
 
-            # 2) Create a Bokeh figure
+                # If user typed something valid, set config["start_datetime"] to that
+                if config["original_start_datetime"] is not None and user_dt_str:
+                    try:
+                        # e.g., "2022-01-01 00:00:00"
+                        user_chosen_dt = datetime.strptime(user_dt_str, "%Y-%m-%d %H:%M:%S")
+
+                        # SHIFT = user_chosen_dt - original_start_datetime
+                        # So if original was 2020-01-01, and user picks 2022-01-01,
+                        # shift = 2 years
+                        shift_offset = user_chosen_dt - config["original_start_datetime"]
+                        config["shift_offset"] = pd.Timedelta(shift_offset)
+
+                        # Also store that the "start_datetime" (i.e. current alignment) is user_chosen_dt
+                        config["start_datetime"] = user_chosen_dt
+
+                    except Exception as e:
+                        print(f"Error parsing user_dt_str={user_dt_str}: {e}")
+                        config["shift_offset"] = pd.Timedelta(0)
+                        config["start_datetime"] = config["original_start_datetime"]
+                else:
+                    # If no user input or no original_start_datetime,
+                    # revert to no shift
+                    config["shift_offset"] = pd.Timedelta(0)
+                    config["start_datetime"] = config["original_start_datetime"]
+
+            # Now build the Bokeh figure
             bokeh_fig = figure(
                 x_axis_type="datetime",
-                title=f"Overlay for Node: {node}",
-                width=1200,
-                height=900,
-                background_fill_color="#FFFFFF"
+                width=800,  # Bokeh >= 3 uses width instead of plot_width
+                height=400,
+                background_fill_color="#FFFFFF",
+                title=f"Overlay for Node: {node}"
             )
 
             legend_items = []
 
-            # 3) For each file, shift the time and plot
+            # Plot each file
             for file, config in self.overlay_data_storage.items():
                 node_dfs = config["node_dfs"]
-                color = config["color"]
                 offset = config["shift_offset"]
-                if node not in node_dfs or node_dfs[node] is None:
-                    continue
-                df = node_dfs[node]
-                if df.empty:
+                color = config["color"]
+                df = node_dfs.get(node)
+                if df is None or df.empty:
                     continue
 
-                # shift the index
+                # Shift the index
                 shifted_index = df.index + offset
-                # Convert to list for Bokeh, or create a ColumnDataSource
                 times = list(shifted_index)
                 flows = df[node].tolist()
 
-                # Add a line to our Bokeh figure
-                r = bokeh_fig.line(
-                    x=times,
-                    y=flows,
-                    line_color=color,
-                    line_width=2,
-                    alpha=0.8
-                )
+                r = bokeh_fig.line(x=times, y=flows, line_color=color, line_width=2, alpha=0.8)
                 legend_items.append((os.path.basename(file), [r]))
 
-            # Add a legend
+                # (Optional) Debug print to confirm shift
+                print(f"File={file}, Node={node}, OrigStart={df.index[0]}, Shift={offset}, NewStart={shifted_index[0]}")
+
+            # Add legend
             if legend_items:
                 legend = Legend(items=legend_items, location="top_left")
                 bokeh_fig.add_layout(legend, 'right')
 
-            # If we already have a display, clear it. Let's store a reference:
+            # If we already have a display, clear it
             if hasattr(self, "bokeh_display_frame"):
                 self.bokeh_display_frame.destroy()
 
             self.bokeh_display_frame = tk.Frame(popup, bg=BG_COLOR)
             self.bokeh_display_frame.pack(pady=10, fill='both', expand=True)
 
-            # 4) Embed Bokeh in Tkinter
-            from bokeh.embed import server_document
-            # But typically, for local usage, we can just show the figure in a browser,
-            # or generate an HTML and open it in a web frame. For a quick hack in Tk,
-            # we might generate an HTML file and display in a tkhtml or webview.
-            # For simplicity, let's just open in browser or generate a local file.
-
-            # We'll do a local temp HTML file approach:
+            # Show in browser or local HTML
             html_content = file_html(bokeh_fig, CDN, "Overlay")
             html_path = os.path.join(os.getcwd(), "temp_overlay.html")
             with open(html_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
 
-            # Now open it with default web browser:
             import webbrowser
             webbrowser.open(f"file://{html_path}")
 
