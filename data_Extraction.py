@@ -337,6 +337,23 @@ class SWMMApp:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load nodes from Excel: {e}")
 
+        # A frame to hold plot size entries
+        size_frame = tk.Frame(popup, bg=BG_COLOR)
+        size_frame.pack(pady=5, fill='x')
+
+        tk.Label(size_frame, text="Plot Width (px):", bg=BG_COLOR, fg=FG_COLOR).grid(row=0, column=0, padx=5)
+        self.plot_width_var = tk.IntVar(value=800)  # default
+        tk.Entry(size_frame, textvariable=self.plot_width_var, width=6,
+                 bg=BUTTON_COLOR, fg=FG_COLOR).grid(row=0, column=1, padx=5)
+
+        tk.Label(size_frame, text="Plot Height (px):", bg=BG_COLOR, fg=FG_COLOR).grid(row=0, column=2, padx=5)
+        self.plot_height_var = tk.IntVar(value=400)  # default
+        tk.Entry(size_frame, textvariable=self.plot_height_var, width=6,
+                 bg=BUTTON_COLOR, fg=FG_COLOR).grid(row=0, column=3, padx=5)
+
+        tk.Label(size_frame, text="(Used by both Bokeh & Matplotlib)",
+                 bg=BG_COLOR, fg=FG_COLOR).grid(row=1, column=0, columnspan=4, pady=(2, 0))
+
         # -----------------------------------------------------------------
         # 3) Buttons for aggregated and comparative visualization
         # -----------------------------------------------------------------
@@ -629,35 +646,44 @@ class SWMMApp:
             config_frame = tk.Frame(file_frame, bg=BG_COLOR)
             config_frame.pack(pady=5, fill='x')
 
-            tk.Label(config_frame, text=os.path.basename(out_file), bg=BG_COLOR, fg=FG_COLOR).grid(row=0, column=0,
-                                                                                                   padx=5)
+            tk.Label(config_frame, text=os.path.basename(out_file), bg=BG_COLOR, fg=FG_COLOR
+                     ).grid(row=0, column=0, padx=5)
 
-            # Color picker
-            def pick_color_for_file(file=out_file):
-                color_code = colorchooser.askcolor(title=f"Choose color for {file}")
-                if color_code and color_code[1]:  # user picked something
-                    self.overlay_data_storage[file]["color"] = color_code[1]
+            # Create a small label that shows the current color
+            color_preview = tk.Label(config_frame, width=3,
+                                     bg=self.overlay_data_storage[out_file]["color"])
+            color_preview.grid(row=0, column=1, padx=5)
+
+            # Capture this out_file & color_preview in the function's defaults:
+            def pick_color_for_file(selected_file=out_file, preview_label=color_preview):
+                color_code = colorchooser.askcolor(title=f"Choose color for {selected_file}")
+                if color_code and color_code[1]:
+                    # Store/update the chosen color
+                    self.overlay_data_storage[selected_file]["color"] = color_code[1]
                     # Update JSON preset
-                    self.color_presets[file] = color_code[1]
+                    self.color_presets[selected_file] = color_code[1]
                     with open(self.color_preset_path, 'w') as f:
                         json.dump(self.color_presets, f)
-                    # Refresh UI if needed
+                    # Update the color preview label
+                    preview_label.config(bg=color_code[1])
 
-            color_button = tk.Button(config_frame, text="Pick Color", bg=BUTTON_COLOR, fg=FG_COLOR,
+            color_button = tk.Button(config_frame, text="Pick Color",
+                                     bg=BUTTON_COLOR, fg=FG_COLOR,
                                      command=pick_color_for_file)
-            color_button.grid(row=0, column=1, padx=5)
+            color_button.grid(row=0, column=2, padx=5)
 
             # Date-time entry for shifting
-            # If we have a known earliest date/time, display it
-            dt_label = tk.Label(config_frame, text="Align Start (YYYY-MM-DD HH:MM):", bg=BG_COLOR, fg=FG_COLOR)
-            dt_label.grid(row=0, column=2, padx=5)
+            dt_label = tk.Label(config_frame, text="Align Start (YYYY-MM-DD HH:MM):",
+                                bg=BG_COLOR, fg=FG_COLOR)
+            dt_label.grid(row=0, column=3, padx=5)
 
             dt_var = tk.StringVar()
             if self.overlay_data_storage[out_file]["start_datetime"] is not None:
                 dt_var.set(str(self.overlay_data_storage[out_file]["start_datetime"]))
 
-            dt_entry = tk.Entry(config_frame, textvariable=dt_var, width=20, bg=BUTTON_COLOR, fg=FG_COLOR)
-            dt_entry.grid(row=0, column=3, padx=5)
+            dt_entry = tk.Entry(config_frame, textvariable=dt_var, width=20,
+                                bg=BUTTON_COLOR, fg=FG_COLOR)
+            dt_entry.grid(row=0, column=4, padx=5)
 
             # Save references for later
             self.file_config_entries[out_file] = {
@@ -713,10 +739,13 @@ class SWMMApp:
                     config["start_datetime"] = config["original_start_datetime"]
 
             # Now build the Bokeh figure
+            bokeh_width = self.plot_width_var.get()
+            bokeh_height = self.plot_height_var.get()
+
             bokeh_fig = figure(
                 x_axis_type="datetime",
-                width=800,  # Bokeh >= 3 uses width instead of plot_width
-                height=400,
+                width=bokeh_width,
+                height=bokeh_height,
                 background_fill_color="#FFFFFF",
                 title=f"Overlay for Node: {node}"
             )
